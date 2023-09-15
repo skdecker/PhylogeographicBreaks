@@ -1,0 +1,241 @@
+---
+title: "Filtering_BirdLifeRanges"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/')
+```
+
+Load necessary packages
+```{r}
+library(stringi)
+library(geosphere)
+library(raster)
+library(plyr)
+library(rgdal)
+library(tools)
+library(apex)
+library(rgeos)
+library(dplyr)
+library(adegenet)
+library(ape)
+library(pegas)
+library(seqinr)
+library(sf)
+library(maptools)
+library(sp)
+```
+
+# Occurrence filtering
+Read in files downloaded from phylogatR - compile species names, file paths, number of sequences, and number of unique occurrences
+```{r}
+#set working directory
+setwd('/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/')
+
+#identify the genes you want to work with - specify the extensions to read in
+COIfiles <- list.files(path='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/', pattern=('-COI.afa'), full.names = TRUE, recursive=TRUE)
+CYTBfiles <- list.files(path='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions//Data/Aves/', pattern=('-CYTB.afa'), full.names = TRUE, recursive=TRUE)
+ND1files <- list.files(path='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions//Data/Aves/', pattern=('-ND1.afa'), full.names = TRUE, recursive=TRUE)
+ND2files <- list.files(path='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions//Data/Aves/', pattern=('-ND2.afa'), full.names = TRUE, recursive=TRUE)
+
+rawfiles = c(COIfiles, CYTBfiles, ND1files, ND2files) #compile files for all genes
+
+for (f in rawfiles) {
+ #get file path, species, and gene name
+  s <- sub("/[^/]+$", "", f) #moves up a directory to species folder
+  species <- gsub('-', ' ', basename(s)) #format species name
+  sp <- basename(f) #get file name
+  sp <- file_path_sans_ext(sp) #remove extension
+  gene <- stri_sub(sp, -4, -1) #isolate last 4 letters of file name
+  gene <- gsub('-', '', gene) #remove dashes for the gene code
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=f)
+  
+  #calculate number of sequences in each alignment
+  length <- length(seqs@labels)
+  
+  #navigate to species folder to get GPS coordinates
+  s <- sub("/[^/]+$", "", f)
+  c <- paste(s, "/occurrences.txt", sep="")
+  occurrences <- read.delim(c)
+  
+  #limit occurrences to individuals with sequence in alignment
+  labels <- seqs@labels
+  occurrences2 <- occurrences[which(occurrences$phylogatr_id %in% c(noquote(labels))),c(4:5)]
+  
+  #calculate number of unique occurrences for each species
+  localities <- nrow(unique(occurrences2))
+  
+  #write output file as csv
+  write.table(data.frame(species, f, gene, length, localities), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/preliminfo_Aves.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+  
+}
+```
+
+```{r}
+#read in stats file we created
+aves <- read.csv(file="Data/preliminfo_Aves.csv", header=FALSE)
+
+#keep species with more than 15 sequences and more than 3 localities
+avesspecies <- aves$V1[which(aves$V4 >= 15  & aves$V5 >= 3)] #species names
+avesdirectories <- aves$V2[which(aves$V4 >= 15  & aves$V5 >= 3)] #directory paths
+```
+
+```{r}
+#get ranges
+#ogrListLayers("/Users/decker.391/Downloads/BOTW_2022_1 2/BOTW.gdb")
+#avesranges = readOGR(dsn= "/Users/decker.391/Downloads/BOTW_2022_1 2/BOTW.gdb", layer="All_Species")
+
+#input file from geodatabase
+gdb_file = paste0("/Users/decker.391/Downloads/", "BOTW_2022_1 2/BOTW.gdb")
+
+#List all feature classes in file geodatabase
+subset(ogrDrivers(), grepl("GDB", name))
+fc_list = ogrListLayers(gdb_file)
+print(fc_list)
+
+#read the feature class
+botw <- st_read(dsn = gdb_file, layer="All_Species")
+
+sub5 = names[201:length(names)]
+
+#find species similar in our data and birdlife data
+avescontainedsp <- intersect(botw$sci_name, sub5)
+aves5ranges <- which(botw$sci_name %in% avescontainedsp)
+not <- which(!(avesspecies %in% avescontainedsp)) #show us if there are any species in our list w/out ranges
+avesspecies[not] #check taxonomy on these species
+
+#subset ranges just for species we have in our dataset
+mybirds <- botw[aves5ranges,]
+class(mybirds)
+
+#save as shapefile
+st_write(mybirds, dsn=paste0("/Users/decker.391/Documents/Research/Phylogatr/BOTW/", "/BirdLife2022/201_270"), layer=NULL, driver="ESRI Shapefile")
+```
+
+Create master file of occurrences
+```{r}
+for (f in avesdirectories) {
+  s <- sub("/[^/]+$", "", f) #navigate to overarching directory
+  c <- paste(s, "/occurrences.txt", sep="") #grab occurrence file
+  spnm1 <- basename(s) #get name
+  spnm <- gsub('-' , ' ' , spnm1) #remove - between genus and species names
+  occurrences <- read.delim(c) #read occurrence files
+  sequences <- occurrences$phylogatr_id #save ID names
+  decimallongitude <- occurrences$longitude #grab longitude
+  decimallatitude <- occurrences$latitude #grab latitude
+
+#write a table with the species name, sequence ID, longitude, and latitude  
+write.table(data.frame(spnm, sequences, decimallongitude, decimallatitude), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/avesgeodata.csv", col.names=FALSE, row.names=FALSE, append=TRUE, sep=',')
+}
+```
+
+Remove species without a range in new uniquebirdranges file
+```{r}
+#read in occurrence file
+occurs <- read.csv(file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/avesgeodata.csv", header=FALSE)
+
+#read in bat range files
+shapefile= "/Users/decker.391/Documents/Research/Phylogatr/BOTW/BirdLife2022/BirdLife2022.shp"
+shp = readOGR(shapefile)
+binomials = shp$sci_nam #save binomials
+
+#trim occurrence file to only species with ranges
+newoccursnames <- which(occurs$V1 %in% unique(binomials))
+newoccurs <- occurs[newoccursnames,]
+
+#write new occurrence file
+colnames(newoccurs) <- c('species', 'sequences', 'decimallongitude', 'decimallatitude')
+write.table(newoccurs, file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/avesgeodata1.csv", col.names=TRUE, row.names=FALSE, append=FALSE, sep=',')
+```
+
+```{r}
+finaloccurrences = read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/avesgeodata1.csv",header=T) #read in occurrences
+names = unique(finaloccurrences$species)
+sub1 = names[1:50]
+
+for (i in 1:length(sub1)) {
+  #find species similar in our data and birdlife data
+  avescontainedsp <- intersect(shp$sci_nam, sub1)
+  avesranges <- which(shp$sci_name %in% avescontainedsp)
+  #not <- which(!(avesspecies %in% avescontainedsp)) #show us if there are any species in our list w/out ranges
+  #avesspecies[not] #check taxonomy on these species
+
+  #subset ranges just for species we have in our dataset
+  mybirds <- shp[avescontainedsp,]
+  mybirds <- st_as_sf(mybirds)
+  class(mybirds)
+
+  #save as shapefile
+  st_write(mybirds, dsn=paste0("/Users/decker.391/Documents/Research/Phylogatr/BOTW/", "/BirdLife2022/1_50"), layer=NULL, driver="ESRI Shapefile")
+}
+```
+
+
+Identify 'good' points (inside species ranges) and 'bad' points (outside of species ranges)
+```{r}
+finaloccurrences = read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/avesgeodata1.csv",header=T) #read in occurrences
+names = unique(finaloccurrences$species)
+#sub2 = names[51:100]
+
+#read in shape file
+shapefile= "/Users/decker.391/Documents/Research/Phylogatr/BOTW/BirdLife2022.shp" 
+shp = readOGR(shapefile)
+binomials = shp$sci_nam #save binomials
+#sort(unique(binomials))
+#sort(sub2)
+#set projection
+crs = "+proj=longlat +ellps=WGS84"
+
+#create dataframes for good and bad points
+good_points = data.frame()
+bad_points = data.frame()
+
+#set a buffer for around the limits of the ranges
+buffer=1 ## this buffer is in degrees lat/long, so 1.0 ~ 110 km
+
+#spp="Spinus spinus" #to do for 1 species
+#sort through occurrence points and compare to ranges - find 'good' and 'bad' points
+for(spp in names){
+  print(spp) #each species
+
+  spppts <- finaloccurrences[finaloccurrences$species==spp,] #species occurrence points
+  spppts$decimallongitude <- round(spppts$decimallongitude, digits=2)
+  spppts$decimallatitude <- round(spppts$decimallatitude, digits=2)
+  spppts$longitude <- as.numeric(spppts$decimallongitude) #longitude
+  spppts$latitude <- as.numeric(spppts$decimallatitude) #latitude
+  
+  pts <- spppts #rename
+  sp::coordinates(pts) <- ~ longitude + latitude #format
+  sp::proj4string(pts) <- sp::CRS(crs) #format projection
+  
+  sppshp <- shp[shp$sci_nam==spp,] #find range shapes for same species
+  sppshp <- sp::spTransform(sppshp, crs) #format range shapes with projection
+  print(sppshp)
+  
+  sppshp_buffer <- rgeos::gBuffer(sppshp,width=buffer) #buffer the ranges - this takes too long
+  print(sppshp_buffer)
+  
+  #see if points fall within range polygons (with buffer)
+  whether_in_polygon <- rgeos::gIntersects(pts,sppshp,byid=T)  
+  inpolygon <- spppts[whether_in_polygon==T,]
+  outpolygon <- spppts[whether_in_polygon==F,]
+
+  #if in polygon: add to 'good points'; if out: add to 'bad points'
+  if(nrow(inpolygon)>1){good_points = gtools::smartbind(good_points,inpolygon)}
+  if(nrow(outpolygon)>1){bad_points = gtools::smartbind(bad_points,outpolygon)}
+}
+
+#write points to objects
+good_points <- unique(good_points)
+bad_points <- unique(bad_points)
+weird_points <- finaloccurrences[finaloccurrences$sequences %in% which(!(finaloccurrences$sequences %in% union(good_points$sequences,bad_points$sequences))), ] #for weird points 
+
+#write the points to files
+write.csv(good_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesgood_points.csv")
+write.csv(bad_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesbad_points.csv")
+write.csv(weird_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesweird_points.csv")
+```
