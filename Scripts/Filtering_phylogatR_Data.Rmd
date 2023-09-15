@@ -1,0 +1,440 @@
+---
+title: "Filtering_phylogatR_Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir='/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/')
+```
+
+Load necessary packages
+```{r}
+library(stringr)
+library(geosphere)
+library(raster)
+library(plyr)
+library(rgdal)
+library(tools)
+library(apex)
+library(rgeos)
+library(dplyr)
+library(adegenet)
+library(ape)
+library(pegas)
+library(seqinr)
+library(sf)
+library(maptools)
+library(sp)
+```
+
+# Occurrence filtering
+Read in files downloaded from phylogatR - compile species names, file paths, number of sequences, and number of unique occurrences
+```{r}
+#set working directory
+setwd('/Users/decker.391/Documents/Research/Phylogatr/FinalVersions')
+
+#identify the genes you want to work with - specify the extensions to read in
+COIfiles <- list.files(path='Data/Aves/', pattern=('-COI.afa'), full.names = TRUE, recursive=TRUE)
+CYTBfiles <- list.files(path='Data/Aves/', pattern=('-CYTB.afa'), full.names = TRUE, recursive=TRUE)
+ND1files <- list.files(path='Data/Aves/', pattern=('-ND1.afa'), full.names = TRUE, recursive=TRUE)
+ND2files <- list.files(path='Data/Aves/', pattern=('-ND2.afa'), full.names = TRUE, recursive=TRUE)
+
+rawfiles = c(COIfiles, CYTBfiles, ND1files, ND2files) #compile files for all genes
+
+for (f in rawfiles) {
+ #get file path, species, and gene name
+  s <- sub("/[^/]+$", "", f) #moves up a directory to species folder
+  species <- gsub('-', ' ', basename(s)) #format species name
+  sp <- basename(f) #get file name
+  sp <- file_path_sans_ext(sp) #remove extension
+  gene <- stri_sub(sp, -4, -1) #isolate last 4 letters of file name
+  gene <- gsub('-', '', gene) #remove dashes for the gene code
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=f)
+  
+  #calculate number of sequences in each alignment
+  length <- length(seqs@labels)
+  
+  #navigate to species folder to get GPS coordinates
+  s <- sub("/[^/]+$", "", f)
+  c <- paste(s, "/occurrences.txt", sep="")
+  occurrences <- read.delim(c)
+  
+  #limit occurrences to individuals with sequence in alignment
+  labels <- seqs@labels
+  occurrences2 <- occurrences[which(occurrences$phylogatr_id %in% c(noquote(labels))),c(4:5)]
+  
+  #calculate number of unique occurrences for each species
+  localities <- nrow(unique(occurrences2))
+  
+  #write output file as csv
+  write.table(data.frame(species, f, gene, length, localities), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/preliminfo_Chiroptera.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+  
+}
+```
+
+Narrow down species that will be used in downstream steps
+```{r}
+#read in stats file we created
+chiroptera <- read.csv(file="Data/preliminfo_Chiroptera.csv", header=FALSE)
+
+#keep species with more than 15 sequences and more than 3 localities
+tofilter <- chiroptera$V1[which(chiroptera$V4 >= 15  & chiroptera$V5 >= 3)] #species names
+directories <- chiroptera$V2[which(chiroptera$V4 >= 15  & chiroptera$V5 >= 3)] #directory paths
+```
+
+Create master file of occurrences
+```{r}
+for (f in directories) {
+  s <- sub("/[^/]+$", "", f) #navigate to overarching directory
+  c <- paste(s, "/occurrences.txt", sep="") #grab occurrence file
+  spnm1 <- basename(s) #get name
+  spnm <- gsub('-' , ' ' , spnm1) #remove - between genus and species names
+  occurrences <- read.delim(c) #read occurrence files
+  sequences <- occurrences$phylogatr_id #save ID names
+  decimallongitude <- occurrences$longitude #grab longitude
+  decimallatitude <- occurrences$latitude #grab latitude
+
+#write a table with the species name, sequence ID, longitude, and latitude  
+write.table(data.frame(spnm, sequences, decimallongitude, decimallatitude), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batgeodata.csv", col.names=FALSE, row.names=FALSE, append=TRUE, sep=',')
+}
+```
+
+Filter by ranges
+```{r}
+#range files from IUCN
+mammalranges <- st_read("/Users/decker.391/Downloads/MAMMALS/MAMMALS.shp")
+
+#trim range files to only keep species in analysis
+containedsp <- intersect(mammalranges$binomial, tofilter)
+ranges <- which(mammalranges$binomial %in% containedsp)
+not <- which(!(tofilter %in% containedsp)) #show us if there are any species in our list w/out ranges
+
+#subset ranges just for species we have in our dataset
+batranges <- mammalranges[ranges,]
+
+#write bat ranges to file
+batranges <- sf::as_Spatial(batranges) #format as spatial dataframe
+shapefile(batranges, "/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batranges.shp")
+```
+
+Remove species without a range in new uniquebatranges file
+```{r}
+#read in occurrence file
+occurs <- read.csv(file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batgeodata.csv", header=FALSE)
+
+#read in bat range files
+shapefile= "/Users/decker.391/Documents/Research/Phylogatr/Data/Chiroptera/Geo/batranges.shp"
+shp = readOGR(shapefile)
+binomials = shp$binomial #save binomials
+
+#trim occurrence file to only species with ranges
+newoccursnames <- which(occurs$V1 %in% unique(binomials))
+newoccurs <- occurs[newoccursnames,]
+
+#write new occurrence file
+colnames(newoccurs) <- c('species', 'sequences', 'decimallongitude', 'decimallatitude')
+write.table(newoccurs, file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batgeodata1.csv", col.names=TRUE, row.names=FALSE, append=FALSE, sep=',')
+```
+
+Identify 'good' points (inside species ranges) and 'bad' points (outside of species ranges)
+```{r}
+finaloccurrences = read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batgeodata1.csv",header=T) #read in occurrences
+
+#read in shape file
+shapefile= "/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/batranges.shp" 
+shp = readOGR(shapefile)
+binomials = shp$binomial #save binomials
+
+#set projection
+crs = "+proj=longlat +ellps=WGS84"
+
+#create dataframes for good and bad points
+good_points = data.frame()
+bad_points = data.frame()
+
+#set a buffer for around the limits of the ranges
+buffer=1.0 ## this buffer is in degrees lat/long, so 1.0 ~ 110 km
+
+#sort through occurrence points and compare to ranges - find 'good' and 'bad' points
+for(spp in sort(unique(binomials))){
+  print(spp) #each species
+
+  spppts <- finaloccurrences[finaloccurrences$species==spp,] #species occurrence points
+  spppts$longitude <- as.numeric(spppts$decimallongitude) #longitude
+  spppts$latitude <- as.numeric(spppts$decimallatitude) #latitude
+  
+  pts <- spppts #rename
+  sp::coordinates(pts) <- ~ longitude + latitude #format
+  sp::proj4string(pts) <- sp::CRS(crs) #format projection
+  
+  sppshp <- shp[shp$binomial==spp,] #find range shapes for same species
+  sppshp <- sp::spTransform(sppshp, crs) #format range shapes with projection
+  
+  sppshp_buffer <- rgeos::gBuffer(sppshp,width=buffer) #buffer the ranges
+
+  #see if points fall within range polygons (with buffer)
+  whether_in_polygon <- rgeos::gIntersects(pts,sppshp_buffer,byid=T)  
+  inpolygon <- spppts[whether_in_polygon==T,]
+  outpolygon <- spppts[whether_in_polygon==F,]
+
+  #if in polygon: add to 'good points'; if out: add to 'bad points'
+  if(nrow(inpolygon)>1){good_points = gtools::smartbind(good_points,inpolygon)}
+  if(nrow(outpolygon)>1){bad_points = gtools::smartbind(bad_points,outpolygon)}
+}
+
+#write points to objects
+good_points <- unique(good_points)
+bad_points <- unique(bad_points)
+weird_points <- finaloccurrences[finaloccurrences$sequences %in% which(!(finaloccurrences$sequences %in% union(good_points$sequences,bad_points$sequences))), ] #for weird points 
+
+#write the points to files
+write.csv(good_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/good_points.csv")
+write.csv(bad_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/bad_points.csv")
+write.csv(weird_points,"/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/weird_points.csv")
+```
+
+Remove 'bad' occurrence points from files, write new occurrence files
+```{r}
+good_occs <- read.csv(file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesgood_points_29Mar2023.csv", header=TRUE) #read in good occurrence points file
+myoccurfiles <- list.files(path="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "occurrences.txt", full.names=TRUE, recursive = TRUE) #find occurrences files
+
+#make new occurrence csv for each species, only containing 'good' points
+for (f in myoccurfiles) {
+  sp <- sub("/[^/]+$", "", f) #navigate to overarching folder
+  sp <- file_path_sans_ext(sp) #save file path
+  
+  #grab occurrence files
+  c <- paste(sp, "/occurrences.txt", sep="") 
+  occurrences <- read.delim(c) 
+  
+  #keep only individuals (IDs) with 'good' occurrence points
+  occurrences2 <- occurrences[which(occurrences$phylogatr_id %in% good_occs$sequences),]
+
+  #write new occurrences to csv within each species folder
+  new_filename = paste(file_path_sans_ext(f),"2.csv",sep="")
+  write.csv(occurrences2, new_filename, quote=FALSE, row.names=FALSE, na="0")
+}
+```
+
+rename final, filtered occurrence files
+```{r}
+myoccurfiles <- list.files(path="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Chiroptera", pattern = "occurrences2_final.csv", full.names=TRUE, recursive = TRUE) #find occurrences files
+info <- read.csv('/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/chirlengths.csv', header=FALSE)
+seqpath <- sub("/[^/]+$", "", info$V2)
+
+#rename only occurrence files for species in the final dataset
+myoccurfiles2 <- list.files(path=seqpath, pattern = "occurrences2_final.csv", full.names=TRUE, recursive = TRUE) #find occurrences files
+
+#make new occurrence csv for each species, only containing 'good' points
+for (f in myoccurfiles2) {
+  sp <- sub("/[^/]+$", "", f) #navigate to overarching folder
+  sp <- file_path_sans_ext(sp) #save file path
+  sp1 <- str_remove(sp, ".*/") #preserve species name to append to occurrence file
+  
+  #grab occurrence files
+  c <- paste(sp, "/occurrences2_final.csv", sep="") 
+  occurrences <- read.csv(c) 
+  
+  
+  #write new occurrences to csv within each species folder
+  new_filename = paste(sp1,"_occurfiltered.csv",sep="") #append species name to occurrence file
+  write.csv(occurrences, new_filename, quote=FALSE, row.names=FALSE, na="0")
+}
+```
+
+
+# Sequence filtering
+Filter sequences with missing data
+```{r}
+aves <- read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/preliminfo_Aves.csv", header=FALSE)
+
+#keep species with more than 15 sequences and more than 3 localities
+tofilter <- aves$V1[which(aves$V4 >= 15  & aves$V5 >= 3)] #species names
+directories <- aves$V2[which(aves$V4 >= 15  & aves$V5 >= 3)] #directory paths
+
+#grab directories from filtering steps above
+files <- directories
+
+for (f in files) {
+ 
+  #get species and gene name
+  sp <- basename(f)
+  sp <- file_path_sans_ext(sp)
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=f)
+  
+  #Calculate total number of sites in alignment  
+  seqsdnabin <- concatenate(seqs[1])
+  totalsites <- sum(base.freq(seqsdnabin, freq=TRUE, all=TRUE))
+
+  #For each sequence in the alignment, calculate number of missing sites
+  for (i in 1:length(seqs@labels)) {
+    inddnabin <- concatenate(seqs[i]) #concatenate multifasta to DNAbin object one seq at a time
+    indfreqs <- base.freq(inddnabin, freq = TRUE, all=TRUE) #calculate base freqs
+    missingeach <- indfreqs[names(indfreqs) == "-"]  #save missing values
+    percentmissing <- (missingeach/totalsites) #calculate percentage of sequence missing
+    
+    #write to file
+    write.table(data.frame(sp, f, seqs@labels[i], missingeach, percentmissing), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesmissing_sites.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+  }
+}
+```
+
+Remove sequences with more than threshold % missing sites
+```{r}
+#read in file with missing data info
+missing <- read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesmissing_sites.csv", header=FALSE)
+colnames(missing) <- c('sp', 'f', 'id', 'missing.sites', 'percent.missing') #set column names
+
+#identify sequences with high missing data
+badlabels = missing$id[which(missing$percent.missing > 0.2)] #threshold set to 20% missing sites
+nrow(missing)
+#remove sequences with high missing data and write new FASTA files for each species
+for (i in 1:nrow(missing)) {
+  f = missing$f[i]
+  #f <- stri_sub(f, 3, to=-1) #format directory path
+  #f <- paste(f,sep="") #format path
+  fasta = read.fasta(f) #read files
+  newfasta = fasta[!(names(fasta) %in% c(badlabels))] #remove sequences with % missing data greater than threshold
+  new_filename = paste(file_path_sans_ext(f),"_missingfiltered.fasta",sep="") #create new file name
+  write.fasta(newfasta, names(newfasta), new_filename, as.string = FALSE) #write new FASTA files (can take a while)
+}
+```
+
+Calculate average genetic distance for each sequence in an alignment
+```{r}
+newfiles <- list.files(path="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "_missingfiltered.fasta", full.names=TRUE, recursive=TRUE) #read in files
+
+for (f in newfiles) {
+ 
+  #get species and gene name
+  sp <- basename(f)
+  sp <- file_path_sans_ext(sp)
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=f)
+
+  #Calculate total number of sites in alignment  
+  seqdnabin <- concatenate(seqs) #format sequences into dnabin object
+  seqdist <- as.matrix(dist.dna(seqdnabin)) #calculate matrix of intraspecific sequence distances
+  seqdistmean <- rowMeans(seqdist) #take mean sequence distance for each sequence
+  means <- unname(seqdistmean) #format means
+  write.table(data.frame(sp, f, seqs@labels, means), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves_SeqDist.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0") #write to file
+  }
+```
+
+Remove sequences with high average distances (potentially misidentified sequences)
+```{r}
+avdist <- read.table(file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves_SeqDist.csv", sep=",") #read distance file
+colnames(avdist) = c('sp', 'f', 'id', 'dist') #give columns names
+bad_labels2 = avdist$id[which(avdist$dist>0.05)] #save sequence IDs for sequences with an average genetic distance greater than threshold (here 10%) to be removed from alignment
+
+for (f in avdist$f) {
+  fasta = read.fasta(f) #read in fasta files
+  newfasta2 = fasta[!(names(fasta) %in% c(bad_labels2))] #create new FASTAs without highly distant sequences
+  new_file2 = paste(file_path_sans_ext(f), "_finalfiltered.fasta", sep="") #new file name
+  write.fasta(newfasta2, names(newfasta2), new_file2, as.string=FALSE) #write new files to FASTAs
+}
+```
+
+#Final Steps
+Remove sequences without locality data
+```{r}
+#read in most recently filtered fastas
+myfinalfiles <- list.files(path ="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "_finalfiltered.fasta", full.names=TRUE, recursive = TRUE)
+
+goodpoints <- read.csv('/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesgood_points_29Mar2023.csv', header=TRUE) #read in 'good points'
+
+goodlabels = goodpoints$sequences #save phylogatR IDs of 'good points'
+
+#remove sequences without a locality point in 'good points'
+for (f in 276:length(myfinalfiles)) {
+  fasta = read.fasta(myfinalfiles[f]) #read FASTAs
+  newfasta = fasta[(names(fasta) %in% c(goodlabels))] #set up new FASTA with only 'good' labels
+  new_filename = paste(file_path_sans_ext(myfinalfiles[f]),"_final.fasta",sep="") #new file name
+  write.fasta(newfasta, names(newfasta), new_filename, as.string = FALSE) #write to new FASTA file
+}
+```
+
+Remove occurrences without sequences
+```{r}
+#file paths
+finalfiles <- list.files(path ="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "_final.fasta", full.names=TRUE, recursive = TRUE)
+occurrencefiles <- list.files(path="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern="occurrences2.csv", full.names=TRUE, recursive=TRUE)
+
+#create list of phylogatR IDs in final FASTA files
+for (f in 279:length(finalfiles)) {
+  fasta = read.fasta(finalfiles[f]) #read in FASTA files
+  path = basename(finalfiles[f]) #save path name
+  ids = names(fasta) #save phylogatR IDs
+  write.table(data.frame(finalfiles[f], ids), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/AvesFinalfasta_names.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0") #write to csv
+}
+
+#read in phylogatR sequence list
+sequences = read.csv("/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/AvesFinalfasta_names.csv", header=FALSE)
+goodids = sequences$V2 #sequence IDs
+for (f in occurrencefiles){
+  occurrences2 = read.csv(f) #read in filtered occurrence files
+  occurrences_final = occurrences2[which(occurrences2$phylogatr_id %in% goodids),] #keep occurrences with sequences
+  
+  new_filename = paste(file_path_sans_ext(f),"_final.csv",sep="") #file name
+  write.csv(occurrences_final, new_filename, quote=FALSE, row.names=FALSE, na="0") #write final occurrence files
+}
+```
+
+Create table with number of sequences and sampling information
+```{r}
+newratfiles <- list.files(path ="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "_final.fasta", full.names=TRUE, recursive = TRUE)
+
+for (f in 279:length(newratfiles)) {
+  
+  #get species and gene name
+  sp <- basename(newratfiles[f])
+  sp <- file_path_sans_ext(sp)
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=newratfiles[f])
+  sp_genind <- multidna2genind(seqs, genes=TRUE)
+  
+  #navigate to species folder to get GPS coordinates
+  s <- sub("/[^/]+$", "", newratfiles[f])
+  c <- paste(s, "/occurrences2_final.csv", sep="")
+  occurrences2 <- read.delim(c, sep=",")
+  
+  labels <- seqs@labels
+  occurrences2 <- occurrences2[which(occurrences2$phylogatr_id %in% c(noquote(labels))),c(5:4)]
+
+  nseq <- length(labels)
+  nocc <- nrow(occurrences2)
+  ch <- chull(occurrences2)
+  coords <-occurrences2[c(ch, ch[1]), ]
+  sp_poly <- SpatialPolygons(list(Polygons(list(Polygon(coords)), ID=1)))
+  area<-gArea(sp_poly)
+  area<-format(area, scientific = FALSE)
+  
+  g <- occurrences2
+  max_lat<-max(g[,2])
+  min_lat<-min(g[,2])
+  median_lat <- median(g[,2])
+  abs_max_lat <- abs(max_lat)
+  abs_min_lat <- abs(min_lat)
+ 
+  length_lat <- max_lat - min_lat
+  
+  max_lon<-max(g[,1])
+  min_lon<-min(g[,1])
+  median_lon <- median(g[,1])
+  length_lon <- max_lon - min_lon
+  
+  species<-file_path_sans_ext(newratfiles[f])
+
+  y<-data.frame(sp, newratfiles[f], nseq, area, max_lat,min_lat,median_lat,abs_max_lat,abs_min_lat,length_lat, max_lon,min_lon,median_lon,length_lon)
+  
+write.table(y, file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/AvesInfo.csv", quote=FALSE, row.names=TRUE, col.names=FALSE, sep=",", append=TRUE)
+}
+```
+
