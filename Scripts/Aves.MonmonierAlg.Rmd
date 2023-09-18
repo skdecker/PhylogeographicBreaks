@@ -1,0 +1,152 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+title: "Untitled"
+author: "Sydney K. Decker"
+date: "12/14/2020"
+output: html_document
+---
+
+---
+title: "Monmonier loop with pdf output Chiroptera"
+author: "Sydney K. Decker"
+date: "9/1/2020"
+output: html_document
+---
+
+
+```{r message=FALSE, warning=FALSE}
+#load necessary packages
+library("tools")
+library("raster")
+library("rgeos")
+library("adegenet")
+library("ape")
+library("pegas")
+library("seqinr")
+library("ggplot2")
+library("dplyr")
+library("apex")
+library("maptools")
+library("ggmap")
+```
+
+
+#Run Monmonier's Algorithm
+```{r}
+#read in filtered fasta files
+myfiles <- list.files(path ="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/", pattern = "_final.fasta", full.names=TRUE, recursive = TRUE)
+
+#loop through fasta files and save the number of sequences per file in csv
+for (f in myratfiles) {
+  sp <- basename(f)
+  sp <- file_path_sans_ext(sp)
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=f)
+  length <- length(seqs@labels)
+  
+  #write table with number of sequences per species
+  write.table(data.frame(sp, f, length), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aveslengths.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+}
+
+#read in csv with the number of sequences per species and keep proceed with species with >14 sequences
+lengths <- read.csv(file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aveslengths.csv", header=FALSE)
+newAvesfiles <- lengths$V2[which(lengths$V3 > 14)]
+```
+
+```{r}
+#set folder for PDFs of results
+PDFFolder <- "/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Aves/PDFs/"
+
+#loop through species folders to conduct Monmonmier's algorithm analysis
+for (i in 1:length(newAvesfiles)) {
+  
+  #get species and gene name
+  sp <- basename(newAvesfiles[195])
+  sp <- file_path_sans_ext(sp)
+  
+  #read in fasta file
+  seqs <- read.multiFASTA(files=newAvesfiles[195])
+  sp_genind <- multidna2genind(seqs, genes=TRUE)
+  
+  #Open PDF file under the folder with the name of the species. Letter means 8.5"x11" size
+  pdf(file = paste(PDFFolder,sp,".pdf",sep=""),paper="letter")
+  
+  #Plot Sequences
+  plot(seqs)
+ 
+  #navigate to species folder to get GPS coordinates
+  s <- sub("/[^/]+$", "", newAvesfiles[195])
+  c <- paste(s, "/occurrences2_final.csv", sep="")
+  occurrences <- read.csv(c)
+  
+  #grab labels from genetic data
+  labels <- seqs@labels
+  
+  #save only occurrences with a corresponding sequence in genetic data
+  occurrences2 <- occurrences[which(occurrences$phylogatr_id %in% c(noquote(labels))),c(4:5)]
+
+  #jitter coordinates - Monmonier's cannot handle duplicate coordinates
+  xy <- as.matrix(occurrences2)
+  xyjitt <- jitter(xy, factor=2)
+  sp_genind$other$xy <- xyjitt
+  
+  #Set up extents of map
+  ymin=(min(occurrences2$latitude)-5)
+  ymax=(max(occurrences2$latitude)+5)
+  xmin=(min(occurrences2$longitude)-5)
+  xmax=(max(occurrences2$longitude)+5)
+  
+  #set the number of 'tries' for Monmonier's algorithm proportionate to number of sequences per species
+  n=length(labels) #number of sequences
+  #number of 'tries' = number of sequences / 10 (rounded down) - if more than 100 sequences, use max 10
+  tries = if (n/10 > 10) {
+  print(10)
+  }else{
+      print(floor(n/10))
+    }
+  
+  #set up distances, network, etc
+  dist <- dist(sp_genind$tab, method="euclidean", diag=FALSE, upper=FALSE) #Euclidean distance
+  network <- chooseCN(sp_genind$other$xy, ask=FALSE, type=1) #Geographic connection network; type 1 = Delaunay triangulation
+  monmonieropt <- optimize.monmonier(sp_genind$other$xy,dist, cn=network, ntry=tries, bd.length=NULL, return.best=TRUE, threshold=NULL, scanthres=FALSE) #run optimized Monmonier's algorithm with number of tries as set above
+  monmonieropt
+  mon = monmonier(sp_genind$other$xy,dist, cn=network)
+  
+  #save boundary coordinates
+  coords <- coords.monmonier(monmonieropt)
+ 
+  #plot algorithm results
+  plot(monmonieropt)
+  
+  #save coordinates as objects
+  Deldir1x <- coords$run1$dir1[,c(1)]
+  Deldir1y <- coords$run1$dir1[,c(2)]
+  Deldir2x <- coords$run1$dir2[,c(1)]
+  Deldir2y <- coords$run1$dir2[,c(2)]
+  
+  #Plot Monmonier's results as thick red line over top occurrences points
+  data(wrld_simpl)
+  plot(wrld_simpl, xlim=c(xmin,xmax), ylim=c(ymin, ymax), axes=TRUE, col="light gray")
+  box()
+  points(sp_genind$other$xy[,2], sp_genind$other$xy[,1], pch=20, col="blue", lwd=3)
+  lines(Deldir1y,Deldir1x,col="red", cex=1, lwd=3)
+  lines(Deldir2y,Deldir2x,col="red", cex=1, lwd=3)
+  
+  #CLOSE the PDF File
+  dev.off()
+  
+  #write coordinates of Monmonier's boundaries to file
+  write.table(data.frame(sp, Deldir1x, Deldir1y), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesbreaks.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+    write.table(data.frame(sp, Deldir2x, Deldir2y), file="/Users/decker.391/Documents/Research/Phylogatr/FinalVersions/Data/Avesbreaks2.csv", quote=FALSE, row.names=FALSE, col.names=FALSE, append=TRUE, sep=",", na="0")
+
+}
+```
